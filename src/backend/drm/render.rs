@@ -350,6 +350,11 @@ where
     }
 
     #[cfg(feature = "wayland_frontend")]
+    fn dmabuf_formats<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Format> + 'a> {
+        self.renderer.dmabuf_formats()
+    }
+
+    #[cfg(feature = "wayland_frontend")]
     fn import_buffer(
         &mut self,
         buffer: &wl_buffer::WlBuffer,

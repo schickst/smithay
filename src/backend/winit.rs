@@ -2,6 +2,7 @@
 
 use crate::backend::egl::display::EGLDisplay;
 use crate::backend::{
+    allocator::Format,
     egl::{context::GlAttributes, native, EGLContext, EGLSurface, Error as EGLError},
     input::{
         Axis, AxisSource, Event as BackendEvent, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
@@ -288,6 +289,10 @@ impl Renderer for WinitGraphicsBackend {
     #[cfg(feature = "wayland_frontend")]
     fn shm_formats(&self) -> &[wl_shm::Format] {
         Renderer::shm_formats(&self.renderer)
+    }
+
+    fn dmabuf_formats<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Format> + 'a> {
+        self.renderer.dmabuf_formats()
     }
 
     #[cfg(feature = "wayland_frontend")]

@@ -17,6 +17,8 @@ use wayland_server::protocol::{wl_buffer, wl_shm};
 use crate::backend::SwapBuffersError;
 #[cfg(feature = "renderer_gl")]
 pub mod gles2;
+#[cfg(feature = "wayland_frontend")]
+use crate::backend::allocator::{dmabuf::Dmabuf, Format};
 #[cfg(all(feature = "wayland_frontend", feature = "backend_egl"))]
 use crate::backend::egl::display::EGLBufferReader;
 
@@ -164,6 +166,12 @@ pub trait Renderer {
         &[wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888]
     }
 
+    /// Returns supported formats for dmabufs.
+    #[cfg(feature = "wayland_frontend")]
+    fn dmabuf_formats<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Format> + 'a> {
+        Box::new([].iter())
+    }
+
     /// Import a given buffer into the renderer.
     ///
     /// Returns a texture_id, which can be used with `render_texture(_at)` or implementation-specific functions.
@@ -255,7 +263,11 @@ pub fn buffer_dimensions(
     buffer: &wl_buffer::WlBuffer,
     egl_buffer_reader: Option<&EGLBufferReader>,
 ) -> Option<(i32, i32)> {
-    if let Some((w, h)) = egl_buffer_reader
+    use crate::backend::allocator::Buffer;
+
+    if let Some(buf) = buffer.as_ref().user_data().get::<Dmabuf>() {
+        Some((buf.width() as i32, buf.height() as i32))
+    } else if let Some((w, h)) = egl_buffer_reader
         .as_ref()
         .and_then(|x| x.egl_buffer_dimensions(&buffer))
     {
@@ -274,7 +286,9 @@ pub fn buffer_dimensions(
 pub fn buffer_dimensions(buffer: &wl_buffer::WlBuffer) -> Option<(i32, i32)> {
     use crate::backend::allocator::Buffer;
 
-    if let Ok((w, h)) =
+    if let Some(buf) = buffer.as_ref().user_data().get::<Dmabuf>() {
+        Some((buf.width() as i32, buf.height() as i32))
+    } else if let Ok((w, h)) =
         crate::wayland::shm::with_buffer_contents(&buffer, |_, data| (data.width, data.height))
     {
         Some((w, h))

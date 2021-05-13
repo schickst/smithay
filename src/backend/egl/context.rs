@@ -1,7 +1,7 @@
 //! EGL context related structs
+use std::collections::HashSet;
 use std::os::raw::c_int;
 use std::sync::atomic::Ordering;
-use std::collections::HashSet;
 
 use super::{ffi, wrap_egl_call, Error, MakeCurrentError};
 use crate::backend::allocator::Format as DrmFormat;
@@ -230,11 +230,13 @@ impl EGLContext {
         }
         Ok(())
     }
-    
+
+    /// Returns a list of formats for dmabufs that can be rendered to
     pub fn dmabuf_render_formats(&self) -> &HashSet<DrmFormat> {
         &self.display.dmabuf_render_formats
     }
-    
+
+    /// Returns a list of formats for dmabufs that can be used as textures
     pub fn dmabuf_texture_formats(&self) -> &HashSet<DrmFormat> {
         &self.display.dmabuf_import_formats
     }

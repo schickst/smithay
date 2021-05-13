@@ -422,18 +422,17 @@ impl EGLDisplay {
 
         for (i, ((fd, offset), stride)) in dmabuf
             .handles()
-            .iter()
             .zip(dmabuf.offsets())
             .zip(dmabuf.strides())
             .enumerate()
         {
             out.extend(&[
                 names[i][0] as i32,
-                *fd,
+                fd,
                 names[i][1] as i32,
-                *offset as i32,
+                offset as i32,
                 names[i][2] as i32,
-                *stride as i32,
+                stride as i32,
             ]);
             if dmabuf.has_modifier() {
                 out.extend(&[

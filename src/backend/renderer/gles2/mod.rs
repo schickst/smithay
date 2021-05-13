@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc::{channel, Receiver, Sender},
+    Arc,
 };
 use std::{collections::HashSet, os::raw::c_char};
 
@@ -20,11 +21,12 @@ mod version;
 use super::{Bind, Renderer, Texture, Transform, Unbind};
 use crate::backend::allocator::{
     dmabuf::{Dmabuf, WeakDmabuf},
-    Format,
+    Buffer, Format,
 };
 use crate::backend::egl::{
-    display::EGLBufferReader, ffi::egl::types::EGLImage, EGLBuffer, EGLContext, EGLSurface,
-    Format as EGLFormat, MakeCurrentError,
+    display::{EGLBufferReader, EGLDisplayHandle},
+    ffi::egl::types::EGLImage,
+    EGLBuffer, EGLContext, EGLSurface, Format as EGLFormat, MakeCurrentError,
 };
 use crate::backend::SwapBuffersError;
 
@@ -414,12 +416,32 @@ impl Gles2Renderer {
 }
 
 struct BufferCache {
+    display: Arc<EGLDisplayHandle>,
     cache: Vec<Option<BufferCacheVariant>>,
 }
 
+impl Drop for BufferCache {
+    fn drop(&mut self) {
+        for entry in self.cache.iter_mut() {
+            match entry.as_mut() {
+                Some(BufferCacheVariant::Dmabuf(Some(DmabufCache { egl, .. }))) => unsafe {
+                    crate::backend::egl::ffi::egl::DestroyImageKHR(**self.display, *egl);
+                },
+                _ => {}
+            }
+        }
+    }
+}
+
 enum BufferCacheVariant {
+    Dmabuf(Option<DmabufCache>),
     Egl(Option<EglCache>),
     Shm(Option<ShmCache>),
+}
+
+struct DmabufCache {
+    egl: EGLImage,
+    texture: Gles2Texture,
 }
 
 struct EglCache {
@@ -561,6 +583,57 @@ impl Gles2Renderer {
 
         *cache = Some(EglCache {
             buf: Some(egl_buffer),
+            texture: texture.clone(),
+        });
+
+        Ok(texture)
+    }
+
+    #[cfg(feature = "wayland_frontend")]
+    fn import_dmabuf(
+        &mut self,
+        buffer: &wl_buffer::WlBuffer,
+        cache: &mut Option<DmabufCache>,
+    ) -> Result<Gles2Texture, Gles2Error> {
+        if !self.extensions.iter().any(|ext| ext == "GL_OES_EGL_image") {
+            return Err(Gles2Error::GLExtensionNotSupported(&["GL_OES_EGL_image"]));
+        }
+
+        // we do not need to reimport external textures
+        if cache.as_ref().map(|x| x.texture.0.is_external).unwrap_or(false) {
+            return Ok(cache.as_ref().map(|x| x.texture.clone()).unwrap());
+        }
+
+        self.make_current()?;
+
+        let dmabuf = buffer
+            .as_ref()
+            .user_data()
+            .get::<Dmabuf>()
+            .expect("import_dmabuf without checking for dmabuf?");
+        let image = cache
+            .as_ref()
+            .map(|x| Ok(x.egl))
+            .unwrap_or_else(|| self.egl.display.create_image_from_dmabuf(dmabuf))
+            .map_err(Gles2Error::BindBufferEGLError)?;
+        let is_external = !self.egl.dmabuf_render_formats().contains(&dmabuf.format());
+
+        let tex = self.import_egl_image(image, is_external, cache.as_ref().map(|x| x.texture.0.texture))?;
+        let texture = cache.as_ref().map(|x| x.texture.clone()).unwrap_or_else(|| {
+            Gles2Texture(Rc::new(Gles2TextureInternal {
+                texture: tex,
+                texture_kind: if is_external { 4 } else { 2 },
+                is_external,
+                y_inverted: dmabuf.y_inverted(),
+                width: dmabuf.width(),
+                height: dmabuf.height(),
+                destruction_callback_sender: self.destruction_callback_sender.clone(),
+            }))
+        });
+        self.egl.unbind()?;
+
+        *cache = Some(DmabufCache {
+            egl: image,
             texture: texture.clone(),
         });
 
@@ -809,6 +882,11 @@ impl Renderer for Gles2Renderer {
     }
 
     #[cfg(feature = "wayland_frontend")]
+    fn dmabuf_formats<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Format> + 'a> {
+        Box::new(self.egl.dmabuf_texture_formats().iter())
+    }
+
+    #[cfg(feature = "wayland_frontend")]
     fn import_buffer(
         &mut self,
         buffer: &wl_buffer::WlBuffer,
@@ -819,6 +897,7 @@ impl Renderer for Gles2Renderer {
             Some(cache) => cache.clone(),
             None => {
                 let cache = BufferCache {
+                    display: self.egl.display.display.clone(),
                     cache: Vec::with_capacity(self.id + 1),
                 };
 
@@ -837,18 +916,21 @@ impl Renderer for Gles2Renderer {
 
         if cache.cache.len() == self.id {
             cache.cache.push(Some(
-                if egl.and_then(|egl| egl.egl_buffer_dimensions(&buffer)).is_some() {
+                if buffer.as_ref().user_data().get::<Dmabuf>().is_some() {
+                    BufferCacheVariant::Dmabuf(None)
+                } else if egl.and_then(|egl| egl.egl_buffer_dimensions(&buffer)).is_some() {
                     BufferCacheVariant::Egl(None)
                 } else if crate::wayland::shm::with_buffer_contents(&buffer, |_, _| ()).is_ok() {
                     BufferCacheVariant::Shm(None)
                 } else {
-                    unreachable!("Completely unknown buffer format. How did we got here?");
-                },
+                    unreachable!("Completely unknown buffer format. How did we got here? Did you forgot to provide an EGLBufferReader?");
+                }
             ));
         }
 
         // delegate for different buffer types
         match cache.cache[self.id].as_mut() {
+            Some(BufferCacheVariant::Dmabuf(cache)) => self.import_dmabuf(&buffer, cache),
             Some(BufferCacheVariant::Egl(cache)) => self.import_egl(&buffer, egl.unwrap(), cache),
             Some(BufferCacheVariant::Shm(cache)) => self.import_shm(&buffer, cache),
             _ => unreachable!(),

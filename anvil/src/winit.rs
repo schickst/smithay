@@ -4,18 +4,31 @@ use smithay::{
     backend::{input::InputBackend, renderer::Renderer, winit, SwapBuffersError},
     reexports::{
         calloop::EventLoop,
-        wayland_server::{protocol::wl_output, Display},
+        wayland_server::{protocol::{wl_buffer, wl_output}, Display},
     },
     wayland::{
         output::{Mode, Output, PhysicalProperties},
         seat::CursorImageStatus,
+        dmabuf::DmabufHandler,
     },
 };
+#[cfg(feature = "egl")]
+use smithay::wayland::dmabuf::init_dmabuf_global;
 
 use slog::Logger;
 
 use crate::drawing::*;
 use crate::state::AnvilState;
+
+struct MyDmabufHandler {
+    renderer: Rc<RefCell<winit::WinitGraphicsBackend>>,
+}
+
+impl DmabufHandler for MyDmabufHandler {
+    fn validate_dmabuf(&mut self, buff: &wl_buffer::WlBuffer) -> bool {
+        self.renderer.borrow_mut().import_buffer(&buff, None).is_ok()
+    }
+}
 
 pub fn run_winit(
     display: Rc<RefCell<Display>>,
@@ -35,6 +48,11 @@ pub fn run_winit(
     #[cfg(feature = "egl")]
     if reader.is_some() {
         info!(log, "EGL hardware-acceleration enabled");
+        let dmabuf_formats = renderer.borrow().dmabuf_formats().cloned().collect::<Vec<_>>();
+        let handler = MyDmabufHandler {
+            renderer: renderer.clone(),
+        };
+        init_dmabuf_global(&mut *display.borrow_mut(), dmabuf_formats, handler, log.clone());
     };
 
     let (w, h): (u32, u32) = renderer.borrow().window_size().physical_size.into();

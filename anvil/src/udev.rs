@@ -12,8 +12,6 @@ use std::{
 use image::{ImageBuffer, Rgba};
 use slog::Logger;
 
-#[cfg(feature = "egl")]
-use smithay::backend::{drm::DevPath, egl::display::EGLBufferReader, udev::primary_gpu};
 use smithay::{
     backend::{
         drm::{device_bind, DeviceHandler, DrmDevice, DrmError, DrmRenderSurface},
@@ -46,7 +44,7 @@ use smithay::{
         input::Libinput,
         nix::{fcntl::OFlag, sys::stat::dev_t},
         wayland_server::{
-            protocol::{wl_output, wl_surface},
+            protocol::{wl_buffer, wl_output, wl_surface},
             Display, Global,
         },
     },
@@ -54,9 +52,15 @@ use smithay::{
     utils::Rectangle,
     wayland::{
         compositor::CompositorToken,
+        dmabuf::DmabufHandler,
         output::{Mode, Output, PhysicalProperties},
         seat::CursorImageStatus,
     },
+};
+#[cfg(feature = "egl")]
+use smithay::{
+    backend::{drm::DevPath, egl::display::EGLBufferReader, udev::primary_gpu},
+    wayland::dmabuf::init_dmabuf_global,
 };
 
 use crate::drawing::*;
@@ -402,6 +406,17 @@ impl<Data: 'static> UdevHandlerImpl<Data> {
     }
 }
 
+struct MyDmabufHandler {
+    renderer: Gles2Renderer,
+}
+
+impl DmabufHandler for MyDmabufHandler {
+    fn validate_dmabuf(&mut self, buff: &wl_buffer::WlBuffer) -> bool {
+        self.renderer.import_buffer(&buff, None).is_ok()
+    }
+}
+
+
 impl<Data: 'static> UdevHandlerImpl<Data> {
     fn device_added(&mut self, device_id: dev_t, path: PathBuf) {
         // Try to open the device
@@ -495,6 +510,21 @@ impl<Data: 'static> UdevHandlerImpl<Data> {
                     .import_bitmap(&self.pointer_image)
                     .expect("Failed to load pointer")
             };
+
+            // init dmabuf support with format list from the primary gpu
+            // TODO: These formats might not be available on other gpus.
+            // We should either update this list with all gpus and validate/use any working gpu
+            // or always render on this gpu and transfer the screens to other gpus in a supported format.
+            #[cfg(feature = "egl")]
+            if is_primary {
+                let context = EGLContext::new_shared(&egl, &context, self.logger.clone()).unwrap();
+                let renderer = unsafe { Gles2Renderer::new(context, self.logger.clone()).unwrap() };
+                let dmabuf_formats = renderer.dmabuf_formats().cloned().collect::<Vec<_>>();
+                let handler = MyDmabufHandler {
+                    renderer,
+                };
+                init_dmabuf_global(&mut *self.display.borrow_mut(), dmabuf_formats, handler, self.logger.clone());
+            }
 
             // Set the handler.
             // Note: if you replicate this (very simple) structure, it is rather easy
